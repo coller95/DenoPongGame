@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Pong Game</title>
+    <style>
+      canvas {
+        border: 1px solid #000;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="pongCanvas" width="800" height="600"></canvas>
+    <script>
+      const canvas = document.getElementById("pongCanvas");
+      const ctx = canvas.getContext("2d");
+      let gameState = null;
+
+      // Connect to the game state SSE endpoint
+      const eventSource = new EventSource("http://localhost:8000/api/game");
+      eventSource.onmessage = (event) => {
+        gameState = JSON.parse(event.data);
+        render();
+      };
+
+      // Render the game state on the canvas
+      function render() {
+        if (!gameState) return;
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        // Draw ball
+        ctx.beginPath();
+        ctx.arc(gameState.ball.x, gameState.ball.y, 10, 0, 2 * Math.PI);
+        ctx.fill();
+
+        // Draw left paddle
+        ctx.fillRect(50 - 10, gameState.leftPaddle, 20, gameState.paddleHeight);
+        // Draw right paddle
+        ctx.fillRect(canvas.width - 50 - 10, gameState.rightPaddle, 20, gameState.paddleHeight);
+      }
+
+      // Example: Sending paddle movement commands
+      // (You might wire these up to key presses)
+      async function movePaddle(side, direction) {
+        await fetch("http://localhost:8000/api/move", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ side, direction }),
+        });
+      }
+
+      // Listen for key events to move paddles
+      document.addEventListener("keydown", (e) => {
+        // For example, use W/S for left paddle and Up/Down arrows for right paddle
+        if (e.key === "w") movePaddle("left", "up");
+        if (e.key === "s") movePaddle("left", "down");
+        if (e.key === "ArrowUp") movePaddle("right", "up");
+        if (e.key === "ArrowDown") movePaddle("right", "down");
+      });
+    </script>
+  </body>
+</html>

@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Pong AI Client</title>
+  </head>
+  <body>
+    <script>
+      // Connect to the SSE endpoint for game state updates
+      const eventSource = new EventSource("http://localhost:8000/api/game");
+
+      eventSource.onmessage = async (event) => {
+        const gameState = JSON.parse(event.data);
+        // Assume the AI controls the right paddle.
+        const rightPaddleY = gameState.rightPaddle;
+        const paddleHeight = gameState.paddleHeight;
+        const paddleCenter = rightPaddleY + paddleHeight / 2;
+        const ballY = gameState.ball.y;
+
+        // Use a small tolerance to prevent jittery movements.
+        const tolerance = 5;
+        let direction = null;
+        if (ballY < paddleCenter - tolerance) {
+          direction = "up";
+        } else if (ballY > paddleCenter + tolerance) {
+          direction = "down";
+        }
+
+        // If a movement is needed, send a move command to the server.
+        if (direction) {
+          try {
+            await fetch("http://localhost:8000/api/move", {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify({
+                side: "right",
+                direction: direction,
+              }),
+            });
+          } catch (error) {
+            console.error("Failed to send move command:", error);
+          }
+        }
+      };
+
+      eventSource.onerror = (error) => {
+        console.error("SSE encountered an error:", error);
+      };
+
+      console.log("Pong AI client started.");
+    </script>
+  </body>
+</html>

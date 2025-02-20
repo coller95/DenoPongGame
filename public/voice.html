@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Pong Mic Controller with Calibration</title>
+    <style>
+      body {
+        font-family: sans-serif;
+        text-align: center;
+      }
+      #status {
+        margin-top: 10px;
+      }
+      #indicators {
+        margin-top: 20px;
+        display: flex;
+        justify-content: center;
+        gap: 20px;
+      }
+      .indicator {
+        width: 100px;
+        height: 100px;
+        background: gray;
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: white;
+        font-size: 1.2em;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Pong Mic Controller with Calibration</h1>
+    <button id="calibrateBtn">Start Calibration</button>
+    <p id="status">
+      Click the button to start calibration. You will record three phases:
+      neutral, high, and low.
+    </p>
+    <div id="indicators">
+      <div id="indicator-up" class="indicator">UP</div>
+      <div id="indicator-down" class="indicator">DOWN</div>
+    </div>
+    <script>
+      // Endpoint for sending paddle move commands.
+      const moveUrl = "http://localhost:8000/api/move";
+
+      // Calibration state and storage for pitch values.
+      let calibrationPhase = "none"; // "none", "neutral", "high", "low", "done"
+      let neutralPitches = [];
+      let highPitches = [];
+      let lowPitches = [];
+      let upThreshold = 0;
+      let downThreshold = 0;
+      const phaseDuration = 3000; // Each phase lasts 3 seconds
+
+      // Human voice frequency range (Hz)
+      const minHumanFreq = 80;
+      const maxHumanFreq = 1000;
+
+      // UI elements.
+      const statusEl = document.getElementById("status");
+      const calibrateBtn = document.getElementById("calibrateBtn");
+      const indicatorUp = document.getElementById("indicator-up");
+      const indicatorDown = document.getElementById("indicator-down");
+
+      // Basic autocorrelation for pitch detection (adapted from Chris Wilson’s demo)
+      function autoCorrelate(buf, sampleRate) {
+        let SIZE = buf.length;
+        let rms = 0;
+        for (let i = 0; i < SIZE; i++) {
+          let val = buf[i];
+          rms += val * val;
+        }
+        rms = Math.sqrt(rms / SIZE);
+        if (rms < 0.01) return -1; // Too quiet
+
+        let r1 = 0, r2 = SIZE - 1;
+        for (let i = 0; i < SIZE / 2; i++) {
+          if (Math.abs(buf[i]) < 0.2) {
+            r1 = i;
+            break;
+          }
+        }
+        for (let i = 1; i < SIZE / 2; i++) {
+          if (Math.abs(buf[SIZE - i]) < 0.2) {
+            r2 = SIZE - i;
+            break;
+          }
+        }
+        buf = buf.slice(r1, r2);
+        SIZE = buf.length;
+        let c = new Array(SIZE).fill(0);
+        for (let lag = 0; lag < SIZE; lag++) {
+          for (let i = 0; i < SIZE - lag; i++) {
+            c[lag] += buf[i] * buf[i + lag];
+          }
+        }
+        let d = 0;
+        while (d < SIZE - 1 && c[d] > c[d + 1]) d++;
+        let maxval = -1, maxpos = -1;
+        for (let i = d; i < SIZE; i++) {
+          if (c[i] > maxval) {
+            maxval = c[i];
+            maxpos = i;
+          }
+        }
+        let T0 = maxpos;
+        if (T0 === 0) return -1;
+        return sampleRate / T0;
+      }
+
+      // Function to send a move command (controlling the left paddle here)
+      async function sendMoveCommand(direction) {
+        try {
+          const response = await fetch(moveUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ side: "left", direction }),
+          });
+          if (!response.ok) {
+            console.error("Move command failed:", response.statusText);
+          }
+        } catch (err) {
+          console.error("Error sending move command:", err);
+        }
+      }
+
+      // Update visual indicators.
+      function updateIndicators(direction) {
+        if (direction === "up") {
+          indicatorUp.style.background = "green";
+          indicatorDown.style.background = "gray";
+        } else if (direction === "down") {
+          indicatorUp.style.background = "gray";
+          indicatorDown.style.background = "green";
+        } else {
+          indicatorUp.style.background = "gray";
+          indicatorDown.style.background = "gray";
+        }
+      }
+
+      // Audio processing variables.
+      let audioContext, analyser, buffer, bufferLength;
+
+      // Main analysis function that runs continuously.
+      function analyze() {
+        analyser.getFloatTimeDomainData(buffer);
+        const pitch = autoCorrelate(buffer, audioContext.sampleRate);
+        if (pitch !== -1 && pitch >= minHumanFreq && pitch <= maxHumanFreq) {
+          if (calibrationPhase === "neutral") {
+            neutralPitches.push(pitch);
+          } else if (calibrationPhase === "high") {
+            highPitches.push(pitch);
+          } else if (calibrationPhase === "low") {
+            lowPitches.push(pitch);
+          } else if (calibrationPhase === "done") {
+            // Main control: decide direction based on calibrated thresholds.
+            let direction = null;
+            if (pitch > upThreshold) {
+              direction = "up";
+            } else if (pitch < downThreshold) {
+              direction = "down";
+            }
+            updateIndicators(direction);
+            if (direction) {
+              sendMoveCommand(direction);
+            }
+          }
+        } else {
+          if (calibrationPhase === "done") {
+            updateIndicators(null);
+          }
+        }
+        requestAnimationFrame(analyze);
+      }
+
+      // Initialize audio processing.
+      async function init() {
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          statusEl.textContent = "Microphone access granted.";
+          audioContext = new (window.AudioContext || window.webkitAudioContext)();
+          analyser = audioContext.createAnalyser();
+          analyser.fftSize = 2048;
+          bufferLength = analyser.fftSize;
+          buffer = new Float32Array(bufferLength);
+          const source = audioContext.createMediaStreamSource(stream);
+          source.connect(analyser);
+          requestAnimationFrame(analyze);
+        } catch (err) {
+          console.error("Error accessing microphone:", err);
+          statusEl.textContent = "Error accessing microphone.";
+        }
+      }
+
+      // Helper: Compute average of an array.
+      function average(arr) {
+        if (arr.length === 0) return 0;
+        return arr.reduce((a, b) => a + b, 0) / arr.length;
+      }
+
+      // Start the calibration process.
+      function startCalibration() {
+        calibrationPhase = "neutral";
+        neutralPitches = [];
+        highPitches = [];
+        lowPitches = [];
+        statusEl.textContent = "Calibration: Please produce a NEUTRAL sound...";
+        calibrateBtn.disabled = true;
+
+        // Phase 1: Neutral for phaseDuration.
+        setTimeout(() => {
+          const neutralAvg = average(neutralPitches);
+          console.log("Neutral average:", neutralAvg);
+          calibrationPhase = "high";
+          statusEl.textContent = "Calibration: Please produce a HIGH pitched sound...";
+          // Phase 2: High for phaseDuration.
+          setTimeout(() => {
+            const highAvg = average(highPitches);
+            console.log("High average:", highAvg);
+            calibrationPhase = "low";
+            statusEl.textContent = "Calibration: Please produce a LOW pitched sound...";
+            // Phase 3: Low for phaseDuration.
+            setTimeout(() => {
+              const lowAvg = average(lowPitches);
+              console.log("Low average:", lowAvg);
+              // Compute thresholds:
+              upThreshold = (neutralAvg + highAvg) / 2;
+              downThreshold = (neutralAvg + lowAvg) / 2;
+              calibrationPhase = "done";
+              statusEl.textContent = "Calibration complete. Now controlling paddle.";
+              calibrateBtn.disabled = false;
+              console.log("Up Threshold:", upThreshold, "Down Threshold:", downThreshold);
+            }, phaseDuration);
+          }, phaseDuration);
+        }, phaseDuration);
+      }
+
+      // Set up event listener for calibration.
+      calibrateBtn.addEventListener("click", startCalibration);
+
+      // Start audio processing.
+      init();
+    </script>
+  </body>
+</html>
